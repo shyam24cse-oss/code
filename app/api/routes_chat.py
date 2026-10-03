@@ -19,7 +19,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_chat_service, get_memory_service
+from app.api.deps import get_chat_service, get_document_service, get_memory_service
 from app.core.exceptions import MissingAPIKeyError, OpenAIServiceError, VectorStoreNotReadyError
 from app.domain.models import MessageRole
 from app.domain.schemas import (
@@ -27,13 +27,92 @@ from app.domain.schemas import (
     ChatRequest,
     ConversationListResponse,
     ConversationResponse,
+    ExplainChatRequest,
     StructuredAnswer,
 )
 from app.services.chat_service import ChatService
+from app.services.document_service import DocumentService
 from app.services.memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Chat"])
+
+
+@router.post(
+    "/chat/explain/stream",
+    summary="Explain selected PDF text and stream the answer",
+)
+def explain_selected_text(
+    request: ExplainChatRequest,
+    chat_service: ChatService = Depends(get_chat_service),
+    document_service: DocumentService = Depends(get_document_service),
+    memory_service: MemoryService = Depends(get_memory_service),
+) -> StreamingResponse:
+    document = document_service.get_document(request.document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    conversation = memory_service.get_or_create_conversation(
+        request.conversation_id, title_hint=request.user_question
+    )
+    history = memory_service.to_prompt_history(memory_service.get_history(conversation.id))
+    try:
+        surrounding_context = document_service.get_context_for_selection(
+            document.id, request.page_number, request.selected_text
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Unable to extract neighboring PDF context: %s", exc)
+        surrounding_context = ""
+
+    contexts = []
+    if document.status.value == "indexed":
+        try:
+            contexts = chat_service.retrieve_context(
+                f"{request.selected_text}\n{request.user_question}",
+                top_k=3,
+                document_ids=[document.id],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vector retrieval unavailable for PDF explanation: %s", exc)
+
+    location = f"{document.filename}, page {request.page_number}"
+    stored_user_message = (
+        f"Selected text ({location}):\n{request.selected_text}\n\n"
+        f"User question:\n{request.user_question}"
+    )
+    memory_service.append_message(conversation.id, MessageRole.USER, stored_user_message)
+    sources = chat_service.contexts_to_sources(contexts)
+
+    def event_stream():
+        yield _sse_event("meta", {"conversation_id": conversation.id})
+        collected = []
+        try:
+            for token in chat_service.stream_explanation(
+                request.selected_text,
+                request.user_question,
+                document.filename,
+                request.page_number,
+                surrounding_context,
+                contexts,
+                history,
+            ):
+                collected.append(token)
+                yield _sse_event("token", {"text": token})
+        except (OpenAIServiceError, MissingAPIKeyError) as exc:
+            yield _sse_event("error", {"detail": exc.message})
+            return
+
+        answer = "".join(collected)
+        memory_service.append_message(
+            conversation.id,
+            MessageRole.ASSISTANT,
+            answer,
+            sources=[source.model_dump() for source in sources],
+        )
+        yield _sse_event("sources", {"sources": [source.model_dump() for source in sources]})
+        yield _sse_event("done", {})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post(

@@ -9,6 +9,7 @@ which PDF library is in use.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -57,3 +58,35 @@ class PDFExtractionService:
 
         logger.info("Extracted %d pages from %s", len(pages), file_path.name)
         return pages
+
+    def extract_surrounding_context(
+        self, file_path: Path, page_number: int, selected_text: str, radius: int = 600
+    ) -> str:
+        """Return bounded text around a selection and its adjacent pages."""
+        pages = self.extract_pages(file_path)
+        if page_number > len(pages):
+            return ""
+
+        page_text = pages[page_number - 1]
+        words = [re.escape(word) for word in selected_text.split()]
+        selected_match = (
+            re.search(r"\s+".join(words), page_text, re.IGNORECASE) if words else None
+        )
+
+        if selected_match:
+            before = page_text[max(0, selected_match.start() - radius) : selected_match.start()]
+            after = page_text[selected_match.end() : selected_match.end() + radius]
+        else:
+            before = page_text[:radius]
+            after = page_text[-radius:]
+
+        context_parts = []
+        if page_number > 1:
+            previous_page = pages[page_number - 2][-400:]
+            context_parts.append(f"Previous page (p. {page_number - 1}): {previous_page}")
+        context_parts.append(f"Selected page before passage (p. {page_number}): {before}")
+        context_parts.append(f"Selected page after passage (p. {page_number}): {after}")
+        if page_number < len(pages):
+            following_page = pages[page_number][:400]
+            context_parts.append(f"Following page (p. {page_number + 1}): {following_page}")
+        return "\n\n".join(part for part in context_parts if part.strip())

@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.deps import get_document_service
+from app.domain.models import Document, DocumentStatus
 from app.main import app
 
 client = TestClient(app)
@@ -40,6 +42,31 @@ def test_upload_rejects_non_pdf(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 400
+
+
+def test_stream_document_file_even_when_indexing_failed(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "uploaded.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 test")
+    document = Document(
+        id="doc-failed",
+        filename="uploaded.pdf",
+        stored_path=str(pdf_path),
+        status=DocumentStatus.FAILED,
+    )
+
+    class StubDocumentService:
+        def get_document(self, document_id: str) -> Document | None:
+            return document if document_id == document.id else None
+
+    app.dependency_overrides[get_document_service] = lambda: StubDocumentService()
+    try:
+        response = client.get(f"/api/documents/{document.id}/file")
+    finally:
+        app.dependency_overrides.pop(get_document_service, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content == b"%PDF-1.4 test"
 
 
 @requires_openai_key

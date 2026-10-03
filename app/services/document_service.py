@@ -88,6 +88,12 @@ class DocumentService:
             if not chunks:
                 raise EmptyDocumentError()
 
+            self._repo.update_status(
+                document_id,
+                DocumentStatus.PROCESSING,
+                page_count=len(pages),
+                chunk_count=len(chunks),
+            )
             self._vector_store.add_chunks(chunks)
 
             self._repo.update_status(
@@ -113,6 +119,16 @@ class DocumentService:
 
     def get_document(self, document_id: str) -> Document | None:
         return self._repo.get(document_id)
+
+    def get_context_for_selection(
+        self, document_id: str, page_number: int, selected_text: str
+    ) -> str:
+        document = self._repo.get(document_id)
+        if document is None:
+            return ""
+        return self._pdf_service.extract_surrounding_context(
+            Path(document.stored_path), page_number, selected_text
+        )
 
     def delete_document(self, document_id: str) -> bool:
         document = self._repo.get(document_id)

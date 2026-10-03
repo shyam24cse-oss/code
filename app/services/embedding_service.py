@@ -30,14 +30,21 @@ class EmbeddingService:
     def client(self) -> OpenAIEmbeddings:
         """Lazily instantiate the LangChain embeddings client."""
         if self._embeddings is None:
-            if not self._settings.openai_api_key:
+            api_key = self._settings.embedding_api_key or self._settings.openai_api_key
+            api_base = self._settings.embedding_api_base or self._settings.openai_api_base
+            if not api_key:
                 raise MissingAPIKeyError()
             self._embeddings = OpenAIEmbeddings(
                 model=self._settings.openai_embedding_model,
-                api_key=self._settings.openai_api_key,  # type: ignore[arg-type]
+                api_key=api_key,  # type: ignore[arg-type]
+                base_url=api_base,
                 timeout=self._settings.openai_request_timeout,
             )
-            logger.info("Initialized OpenAIEmbeddings (%s)", self._settings.openai_embedding_model)
+            logger.info(
+                "Initialized OpenAIEmbeddings (%s, base=%s)",
+                self._settings.openai_embedding_model,
+                api_base,
+            )
         return self._embeddings
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

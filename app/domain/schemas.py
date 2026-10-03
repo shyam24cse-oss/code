@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,22 @@ class ChatRequest(BaseModel):
     top_k: int | None = Field(
         default=None, ge=1, le=20, description="Override the number of retrieved chunks."
     )
+
+
+class ExplainChatRequest(BaseModel):
+    selected_text: str = Field(..., min_length=1, max_length=12000)
+    user_question: str = Field(..., min_length=1, max_length=4000)
+    document_id: str = Field(..., min_length=1)
+    page_number: int = Field(..., ge=1)
+    conversation_id: str | None = None
+
+    @field_validator("selected_text", "user_question")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Selected text and question must not be empty.")
+        return value
 
 
 class SourceReference(BaseModel):

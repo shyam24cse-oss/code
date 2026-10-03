@@ -26,7 +26,11 @@ from langchain_core.prompts import PromptTemplate
 from openai import APIError, OpenAI, OpenAIError
 
 from app.config import Settings, get_settings
-from app.core.constants import DEFAULT_SYSTEM_PROMPT, STRUCTURED_SYSTEM_PROMPT
+from app.core.constants import (
+    DEFAULT_SYSTEM_PROMPT,
+    PDF_READER_SYSTEM_PROMPT,
+    STRUCTURED_SYSTEM_PROMPT,
+)
 from app.core.exceptions import MissingAPIKeyError, OpenAIServiceError
 from app.domain.models import RetrievedContext
 from app.domain.schemas import SourceReference, StructuredAnswer
@@ -67,6 +71,7 @@ class ChatService:
                 raise MissingAPIKeyError()
             self._client = OpenAI(
                 api_key=self._settings.openai_api_key,
+                base_url=self._settings.openai_api_base,
                 timeout=self._settings.openai_request_timeout,
             )
         return self._client
@@ -85,6 +90,24 @@ class ChatService:
     def _build_user_prompt(self, question: str, contexts: list[RetrievedContext]) -> str:
         context_block = self._retrieval_service.format_context(contexts)
         return _USER_PROMPT_TEMPLATE.format(context=context_block, question=question)
+
+    @staticmethod
+    def build_explanation_prompt(
+        selected_text: str,
+        user_question: str,
+        document_name: str,
+        page_number: int,
+        surrounding_context: str,
+        contexts: list[RetrievedContext],
+    ) -> str:
+        retrieved_context = RetrievalService.format_context(contexts) if contexts else "None."
+        return (
+            f"Selected text (primary source, {document_name}, page {page_number}):\n"
+            f"{selected_text}\n\n"
+            f"Nearby PDF context (use only if relevant):\n{surrounding_context or 'None.'}\n\n"
+            f"Retrieved PDF excerpts (use only if relevant):\n{retrieved_context}\n\n"
+            f"User's question (answer this request about the selected text):\n{user_question}"
+        )
 
     @staticmethod
     def contexts_to_sources(contexts: list[RetrievedContext]) -> list[SourceReference]:
@@ -131,6 +154,45 @@ class ChatService:
         except OpenAIError as exc:
             logger.exception("OpenAI streaming call failed")
             raise OpenAIServiceError(f"Streaming generation failed: {exc}") from exc
+
+    def stream_explanation(
+        self,
+        selected_text: str,
+        user_question: str,
+        document_name: str,
+        page_number: int,
+        surrounding_context: str,
+        contexts: list[RetrievedContext],
+        history: list[dict[str, str]] | None = None,
+    ) -> Iterator[str]:
+        """Stream an answer focused on selected PDF text and its question."""
+        prompt = self.build_explanation_prompt(
+            selected_text,
+            user_question,
+            document_name,
+            page_number,
+            surrounding_context,
+            contexts,
+        )
+        conversation_input = [*(history or []), {"role": "user", "content": prompt}]
+
+        try:
+            with self.client.responses.stream(
+                model=self._settings.openai_chat_model,
+                instructions=PDF_READER_SYSTEM_PROMPT,
+                input=conversation_input,  # type: ignore[arg-type]
+                max_output_tokens=self._settings.openai_max_output_tokens,
+            ) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta":
+                        yield event.delta
+                    elif event.type == "response.error":
+                        logger.error("PDF explanation stream error: %s", event.error)
+                        raise OpenAIServiceError(str(event.error))
+                stream.until_done()
+        except OpenAIError as exc:
+            logger.exception("OpenAI PDF explanation call failed")
+            raise OpenAIServiceError(f"Explanation generation failed: {exc}") from exc
 
     def generate_answer(
         self,

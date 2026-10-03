@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -46,7 +46,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # OpenAI
     # ------------------------------------------------------------------
-    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_api_key: str = Field(
+        default="", validation_alias=AliasChoices("OPENAI_API_KEY", "LLM_API_KEY")
+    )
+    openai_api_base: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("OPENAI_API_BASE", "OPENAI_BASE_URL"),
+    )
+    embedding_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("EMBEDDING_API_KEY", "OPENAI_EMBEDDING_API_KEY"),
+    )
+    embedding_api_base: str = Field(
+        default="",
+        validation_alias=AliasChoices("EMBEDDING_API_BASE", "OPENAI_EMBEDDING_BASE_URL"),
+    )
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_embedding_model: str = Field(
         default="text-embedding-3-small", alias="OPENAI_EMBEDDING_MODEL"

@@ -8,8 +8,11 @@ Text Extraction" features by delegating to :class:`DocumentService`.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi.responses import FileResponse
+from openai import OpenAIError
 
 from app.api.deps import get_document_service
 from app.core.exceptions import (
@@ -55,10 +58,27 @@ async def upload_document(
     except (UnsupportedFileTypeError, FileTooLargeError, EmptyDocumentError) as exc:
         logger.warning("Upload rejected: %s", exc.message)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
+    except OpenAIError as exc:
+        logger.exception("PDF was saved but embedding generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "PDF saved and text extracted, but indexing failed because the embedding "
+                "provider rejected the request. Check API quota and retry."
+            ),
+        ) from exc
     except PDFChatGPTError as exc:
         logger.exception("Ingestion failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=exc.message
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("PDF saved but indexing failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "PDF saved, but indexing failed. The saved file remains available in the library."
+            ),
         ) from exc
 
     return DocumentUploadResponse(document=DocumentResponse.model_validate(document))
@@ -77,6 +97,25 @@ def list_documents(
         documents=[DocumentResponse.model_validate(d) for d in documents],
         total=len(documents),
     )
+
+
+@router.get(
+    "/{document_id}/file",
+    response_class=FileResponse,
+    summary="Stream the original uploaded PDF",
+)
+def get_document_file(
+    document_id: str, service: DocumentService = Depends(get_document_service)
+) -> FileResponse:
+    document = service.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    stored_path = Path(document.stored_path)
+    if not stored_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PDF file not found.")
+
+    return FileResponse(stored_path, media_type="application/pdf")
 
 
 @router.get(

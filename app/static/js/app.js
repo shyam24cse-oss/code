@@ -12,11 +12,27 @@
   "use strict";
 
   const API_BASE = "";
+  const pdfjsLib = window.pdfjsLib;
+  if (pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
   const state = {
     conversationId: null,
     documents: [],
     conversations: [],
     isStreaming: false,
+    activeDocument: null,
+    pdfDocument: null,
+    pageObserver: null,
+    visiblePageObserver: null,
+    pageNodes: new Map(),
+    renderedPages: new Set(),
+    currentPage: 1,
+    readerScale: 1,
+    selectedText: null,
+    searchQuery: "",
+    searchNextPage: 1,
   };
 
   // ---------------------------------------------------------------------
@@ -39,6 +55,25 @@
     sendBtn: document.getElementById("send-btn"),
     conversationTitle: document.getElementById("conversation-title"),
     healthIndicator: document.getElementById("health-indicator"),
+    readerDocumentTitle: document.getElementById("reader-document-title"),
+    readerPageTotal: document.getElementById("reader-page-total"),
+    readerPrev: document.getElementById("reader-prev"),
+    readerNext: document.getElementById("reader-next"),
+    readerPageNumber: document.getElementById("reader-page-number"),
+    readerZoomOut: document.getElementById("reader-zoom-out"),
+    readerZoomIn: document.getElementById("reader-zoom-in"),
+    readerZoomLevel: document.getElementById("reader-zoom-level"),
+    readerSearchForm: document.getElementById("reader-search-form"),
+    readerSearch: document.getElementById("reader-search"),
+    readerSearchStatus: document.getElementById("reader-search-status"),
+    pdfScroll: document.getElementById("pdf-scroll"),
+    pdfPages: document.getElementById("pdf-pages"),
+    readerEmpty: document.getElementById("reader-empty"),
+    selectedTextPanel: document.getElementById("selected-text-panel"),
+    selectedTextPage: document.getElementById("selected-text-page"),
+    selectedTextContent: document.getElementById("selected-text-content"),
+    clearSelection: document.getElementById("clear-selection"),
+    explainSelection: document.getElementById("explain-selection"),
   };
 
   marked.setOptions({
@@ -135,7 +170,7 @@
       li.className = "document-item";
       li.innerHTML = `
         <div class="document-item-row">
-          <span class="document-name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</span>
+          <button class="document-name document-open-btn" data-id="${doc.id}" title="Open PDF: ${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</button>
           <button class="delete-doc-btn" data-id="${doc.id}" title="Delete document">
             <svg class="icon" viewBox="0 0 24 24" width="14" height="14"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
           </button>
@@ -143,11 +178,15 @@
         <div class="document-meta">
           <span class="status-badge status-${doc.status}">${doc.status}</span>
           &middot; ${doc.page_count} pages &middot; ${doc.chunk_count} chunks
+          ${doc.error_message ? `<div class="document-error" title="${escapeHtml(doc.error_message)}">${escapeHtml(doc.error_message)}</div>` : ""}
         </div>`;
       el.documentList.appendChild(li);
     }
     el.documentList.querySelectorAll(".delete-doc-btn").forEach((btn) => {
       btn.addEventListener("click", () => deleteDocument(btn.dataset.id));
+    });
+    el.documentList.querySelectorAll(".document-open-btn").forEach((btn) => {
+      btn.addEventListener("click", () => openDocument(btn.dataset.id));
     });
   }
 
@@ -179,11 +218,13 @@
   }
 
   async function uploadFiles(files) {
+    let lastUploadedName = "";
     for (const file of files) {
-      if (file.type !== "application/pdf") {
+      if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
         toast(`${file.name} is not a PDF file.`, "error");
         continue;
       }
+      lastUploadedName = file.name;
       el.uploadProgress.classList.remove("hidden");
       el.uploadProgressText.textContent = `Indexing ${file.name}...`;
       const formData = new FormData();
@@ -202,11 +243,259 @@
     }
     el.uploadProgress.classList.add("hidden");
     await refreshDocuments();
+    const uploadedDocument = state.documents.find((doc) => doc.filename === lastUploadedName);
+    if (uploadedDocument) await openDocument(uploadedDocument.id);
   }
 
   el.fileInput.addEventListener("change", (e) => {
     if (e.target.files.length) uploadFiles(Array.from(e.target.files));
     e.target.value = "";
+  });
+
+  // ---------------------------------------------------------------------
+  // PDF reader
+  // ---------------------------------------------------------------------
+  function setReaderControlsEnabled(enabled) {
+    for (const control of [
+      el.readerPrev,
+      el.readerNext,
+      el.readerPageNumber,
+      el.readerZoomOut,
+      el.readerZoomIn,
+      el.readerSearch,
+      el.readerSearchForm.querySelector("button"),
+    ]) {
+      control.disabled = !enabled;
+    }
+  }
+
+  async function openDocument(documentId) {
+    const selectedDocument = state.documents.find((item) => item.id === documentId);
+    if (!selectedDocument) return;
+    if (!pdfjsLib) {
+      toast("The PDF viewer could not load. Check your network connection and reload.", "error");
+      return;
+    }
+
+    state.activeDocument = selectedDocument;
+    state.pdfDocument = null;
+    state.renderedPages.clear();
+    state.pageNodes.clear();
+    state.currentPage = 1;
+    state.readerScale = 1;
+    clearSelection();
+    state.pageObserver?.disconnect();
+    state.visiblePageObserver?.disconnect();
+    el.pdfPages.replaceChildren();
+    el.readerEmpty.classList.add("hidden");
+    el.readerDocumentTitle.textContent = selectedDocument.filename;
+    el.readerPageTotal.textContent = "Loading PDF...";
+    el.readerSearchStatus.textContent = "";
+    setReaderControlsEnabled(false);
+
+    try {
+      const loadingTask = pdfjsLib.getDocument(`/api/documents/${documentId}/file`);
+      const pdfDocument = await loadingTask.promise;
+      state.pdfDocument = pdfDocument;
+      el.readerPageTotal.textContent = `of ${pdfDocument.numPages}`;
+      el.readerPageNumber.max = String(pdfDocument.numPages);
+      el.readerPageNumber.value = "1";
+      setReaderControlsEnabled(true);
+      createPagePlaceholders(pdfDocument.numPages);
+      el.pdfScroll.scrollTop = 0;
+    } catch (error) {
+      el.readerPageTotal.textContent = "Could not open PDF";
+      el.readerEmpty.classList.remove("hidden");
+      el.readerEmpty.querySelector("p").textContent =
+        error.message || "The saved PDF could not be read.";
+      toast("Could not open this PDF.", "error");
+    }
+  }
+
+  function createPagePlaceholders(pageCount) {
+    el.pdfPages.replaceChildren();
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = document.createElement("div");
+      page.className = "pdf-page";
+      page.dataset.pageNumber = String(pageNumber);
+      page.setAttribute("aria-label", `PDF page ${pageNumber}`);
+      const placeholder = document.createElement("div");
+      placeholder.className = "pdf-page-placeholder";
+      placeholder.textContent = `Page ${pageNumber}`;
+      page.appendChild(placeholder);
+      el.pdfPages.appendChild(page);
+      state.pageNodes.set(pageNumber, page);
+    }
+
+    state.pageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            renderPdfPage(Number(entry.target.dataset.pageNumber));
+            state.pageObserver.unobserve(entry.target);
+          }
+        }
+      },
+      { root: el.pdfScroll, rootMargin: "700px 0px", threshold: 0.01 },
+    );
+    state.visiblePageObserver = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => Math.abs(a.boundingClientRect.top) - Math.abs(b.boundingClientRect.top));
+        if (visible.length) setCurrentPage(Number(visible[0].target.dataset.pageNumber));
+      },
+      { root: el.pdfScroll, threshold: 0.35 },
+    );
+    for (const page of state.pageNodes.values()) {
+      state.pageObserver.observe(page);
+      state.visiblePageObserver.observe(page);
+    }
+  }
+
+  async function renderPdfPage(pageNumber) {
+    const pdfDocument = state.pdfDocument;
+    const wrapper = state.pageNodes.get(pageNumber);
+    if (!pdfDocument || !wrapper || state.renderedPages.has(pageNumber)) return;
+    state.renderedPages.add(pageNumber);
+    try {
+      const page = await pdfDocument.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(240, el.pdfScroll.clientWidth - 40);
+      const scale = Math.min(state.readerScale, availableWidth / baseViewport.width);
+      const viewport = page.getViewport({ scale });
+      const outputScale = window.devicePixelRatio || 1;
+      const canvas = document.createElement("canvas");
+      canvas.className = "pdf-canvas";
+      canvas.width = Math.ceil(viewport.width * outputScale);
+      canvas.height = Math.ceil(viewport.height * outputScale);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      const context = canvas.getContext("2d");
+      context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+      wrapper.replaceChildren(canvas);
+      wrapper.style.width = `${viewport.width}px`;
+      wrapper.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
+
+      await page.render({ canvasContext: context, viewport }).promise;
+      const textLayer = document.createElement("div");
+      textLayer.className = "pdf-text-layer textLayer";
+      textLayer.style.width = `${viewport.width}px`;
+      textLayer.style.height = `${viewport.height}px`;
+      textLayer.style.setProperty("--scale-factor", String(viewport.scale));
+      wrapper.appendChild(textLayer);
+      const textContent = await page.getTextContent();
+      await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs: [] }).promise;
+      wrapper.classList.add("is-rendered");
+      if (state.searchQuery) highlightSearchMatches(textLayer, state.searchQuery);
+    } catch (error) {
+      wrapper.textContent = `Page ${pageNumber} could not be rendered: ${error.message}`;
+      wrapper.classList.add("pdf-page-error");
+    }
+  }
+
+  function setCurrentPage(pageNumber) {
+    state.currentPage = pageNumber;
+    el.readerPageNumber.value = String(pageNumber);
+  }
+
+  function goToPage(pageNumber) {
+    if (!state.pdfDocument) return;
+    const safePage = Math.max(1, Math.min(state.pdfDocument.numPages, pageNumber));
+    setCurrentPage(safePage);
+    state.pageNodes.get(safePage)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    renderPdfPage(safePage);
+  }
+
+  function updateZoom(nextZoom) {
+    if (!state.pdfDocument) return;
+    state.readerScale = Math.max(0.65, Math.min(2, nextZoom));
+    el.readerZoomLevel.textContent = `${Math.round(state.readerScale * 100)}%`;
+    state.renderedPages.clear();
+    createPagePlaceholders(state.pdfDocument.numPages);
+    goToPage(state.currentPage);
+  }
+
+  async function findNextMatch() {
+    const query = el.readerSearch.value.trim();
+    const pdfDocument = state.pdfDocument;
+    if (!query || !pdfDocument) return;
+    const startPage = state.searchQuery === query ? state.searchNextPage : state.currentPage;
+    state.searchQuery = query;
+    el.readerSearchStatus.textContent = "Searching...";
+    for (let offset = 0; offset < pdfDocument.numPages; offset += 1) {
+      const pageNumber = ((startPage - 1 + offset) % pdfDocument.numPages) + 1;
+      const page = await pdfDocument.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items.map((item) => item.str || "").join(" ");
+      if (text.toLocaleLowerCase().includes(query.toLocaleLowerCase())) {
+        state.searchNextPage = (pageNumber % pdfDocument.numPages) + 1;
+        el.readerSearchStatus.textContent = `Match on page ${pageNumber}`;
+        goToPage(pageNumber);
+        const pageNode = state.pageNodes.get(pageNumber);
+        await renderPdfPage(pageNumber);
+        highlightSearchMatches(pageNode.querySelector(".pdf-text-layer"), query);
+        return;
+      }
+    }
+    el.readerSearchStatus.textContent = "No matches found";
+  }
+
+  function highlightSearchMatches(textLayer, query) {
+    if (!textLayer) return;
+    textLayer.querySelectorAll(".pdf-search-hit").forEach((span) => span.classList.remove("pdf-search-hit"));
+    const normalizedQuery = query.toLocaleLowerCase();
+    for (const span of textLayer.querySelectorAll("span")) {
+      if (span.textContent.toLocaleLowerCase().includes(normalizedQuery)) {
+        span.classList.add("pdf-search-hit");
+      }
+    }
+  }
+
+  function showSelection(text, pageNumber) {
+    state.selectedText = {
+      text: text.slice(0, 12000),
+      documentId: state.activeDocument.id,
+      pageNumber,
+    };
+    el.selectedTextPage.textContent = `Selected text · page ${pageNumber}`;
+    el.selectedTextContent.textContent = state.selectedText.text;
+    el.selectedTextPanel.classList.remove("hidden");
+  }
+
+  function clearSelection() {
+    state.selectedText = null;
+    el.selectedTextPanel.classList.add("hidden");
+    el.selectedTextContent.textContent = "";
+    window.getSelection()?.removeAllRanges();
+  }
+
+  document.addEventListener("selectionchange", () => {
+    if (!state.activeDocument) return;
+    const selection = window.getSelection();
+    const text = selection?.toString().trim();
+    if (!text) return;
+    const anchor = selection.anchorNode instanceof Element
+      ? selection.anchorNode
+      : selection.anchorNode?.parentElement;
+    const page = anchor?.closest(".pdf-page");
+    if (page && page.closest("#pdf-pages")) showSelection(text, Number(page.dataset.pageNumber));
+  });
+
+  el.readerPrev.addEventListener("click", () => goToPage(state.currentPage - 1));
+  el.readerNext.addEventListener("click", () => goToPage(state.currentPage + 1));
+  el.readerPageNumber.addEventListener("change", () => goToPage(Number(el.readerPageNumber.value)));
+  el.readerZoomOut.addEventListener("click", () => updateZoom(state.readerScale - 0.15));
+  el.readerZoomIn.addEventListener("click", () => updateZoom(state.readerScale + 0.15));
+  el.readerSearchForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    findNextMatch();
+  });
+  el.clearSelection.addEventListener("click", clearSelection);
+  el.explainSelection.addEventListener("click", () => {
+    el.chatInput.value = "Explain this in simple words.";
+    el.chatInput.focus();
+    el.chatInput.dispatchEvent(new Event("input"));
   });
 
   // ---------------------------------------------------------------------
@@ -313,6 +602,31 @@
     return bubble;
   }
 
+  function appendUserMessage(question, selectedText) {
+    const welcome = el.chatMessages.querySelector(".welcome-card");
+    if (welcome) welcome.remove();
+
+    const row = document.createElement("div");
+    row.className = "message-row user";
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = "You";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (selectedText) {
+      const quote = document.createElement("blockquote");
+      quote.className = "selected-quote";
+      quote.textContent = selectedText;
+      bubble.appendChild(quote);
+    }
+    const questionText = document.createElement("div");
+    questionText.textContent = question;
+    bubble.appendChild(questionText);
+    row.append(avatar, bubble);
+    el.chatMessages.appendChild(row);
+    el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+  }
+
   function appendTypingIndicator() {
     const row = document.createElement("div");
     row.className = "message-row assistant";
@@ -333,17 +647,28 @@
     state.isStreaming = true;
     el.sendBtn.disabled = true;
 
-    appendMessage("user", question);
+    const selected = state.selectedText;
+    appendUserMessage(question, selected?.text);
     appendTypingIndicator();
 
-    const payload = {
+    const explanationPayload = selected
+      ? {
+          selected_text: selected.text,
+          user_question: question,
+          document_id: selected.documentId,
+          page_number: selected.pageNumber,
+          conversation_id: state.conversationId,
+        }
+      : null;
+    const payload = explanationPayload || {
       question,
       conversation_id: state.conversationId,
       document_ids: el.documentScope.value ? [el.documentScope.value] : null,
     };
 
     try {
-      const res = await fetch(`${API_BASE}/api/chat/stream`, {
+      const endpoint = explanationPayload ? "/api/chat/explain/stream" : "/api/chat/stream";
+      const res = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

@@ -11,6 +11,9 @@
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/css/style.css" />
 
+    <!-- PDF.js renders the original document with a selectable text layer. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
     <!-- Markdown rendering -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
     <!-- Syntax highlighting -->
@@ -114,8 +117,53 @@
         </svg>
       </button>
 
-      <!-- ================= Main chat panel ================= -->
-      <main class="chat-panel">
+      <div class="reader-chat-workspace">
+        <section class="pdf-reader-panel" aria-label="PDF reader">
+          <header class="reader-header">
+            <div class="reader-title-row">
+              <h1 id="reader-document-title">PDF Reader</h1>
+              <span id="reader-page-total" class="reader-page-total">No document</span>
+            </div>
+            <div class="reader-toolbar" role="toolbar" aria-label="PDF controls">
+              <div class="reader-page-controls">
+                <button id="reader-prev" class="icon-btn" title="Previous page" aria-label="Previous page" disabled>
+                  <svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+                </button>
+                <label class="reader-page-label" for="reader-page-number">Page</label>
+                <input id="reader-page-number" type="number" min="1" value="1" aria-label="Current PDF page" disabled />
+                <button id="reader-next" class="icon-btn" title="Next page" aria-label="Next page" disabled>
+                  <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>
+                </button>
+              </div>
+              <div class="reader-zoom-controls">
+                <button id="reader-zoom-out" class="icon-btn" title="Zoom out" aria-label="Zoom out" disabled>
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14" /></svg>
+                </button>
+                <span id="reader-zoom-level" class="reader-zoom-level">100%</span>
+                <button id="reader-zoom-in" class="icon-btn" title="Zoom in" aria-label="Zoom in" disabled>
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14" /></svg>
+                </button>
+              </div>
+              <form id="reader-search-form" class="reader-search-form" role="search">
+                <input id="reader-search" type="search" placeholder="Find in PDF" aria-label="Search PDF" disabled />
+                <button class="icon-btn" type="submit" title="Find next" aria-label="Find next" disabled>
+                  <svg class="icon" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>
+                </button>
+              </form>
+            </div>
+            <div id="reader-search-status" class="reader-search-status" aria-live="polite"></div>
+          </header>
+          <div id="pdf-scroll" class="pdf-scroll">
+            <div id="reader-empty" class="reader-empty">
+              <h2>Your document appears here</h2>
+              <p>Choose a PDF from the library or upload one to begin reading.</p>
+            </div>
+            <div id="pdf-pages" class="pdf-pages" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- ================= Existing chat panel ================= -->
+        <main class="chat-panel">
         <header class="chat-header">
           <div>
             <h1 id="conversation-title">New Conversation</h1>
@@ -130,6 +178,19 @@
             </select>
           </div>
         </header>
+
+        <section id="selected-text-panel" class="selected-text-panel hidden" aria-live="polite">
+          <div class="selected-text-heading">
+            <span id="selected-text-page">Selected text</span>
+            <button id="clear-selection" class="icon-btn" title="Clear selection" aria-label="Clear selection">
+              <svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
+          <blockquote id="selected-text-content"></blockquote>
+          <button id="explain-selection" class="btn btn-primary explain-selection-btn" type="button">
+            Explain selection
+          </button>
+        </section>
 
         <div id="chat-messages" class="chat-messages">
           <div class="welcome-card">
@@ -167,7 +228,8 @@
             </svg>
           </button>
         </form>
-      </main>
+        </main>
+      </div>
     </div>
 
     <script src="/static/js/app.js"></script>

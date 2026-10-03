@@ -26,3 +26,24 @@ def test_extract_pages_rejects_non_pdf(tmp_path: Path) -> None:
     service = PDFExtractionService()
     with pytest.raises(UnsupportedFileTypeError):
         service.extract_pages(fake_file)
+
+
+def test_extract_surrounding_context_uses_selection_and_adjacent_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = PDFExtractionService()
+    pages = [
+        "previous material " * 30,
+        "before selected sentence after",
+        "following material " * 30,
+    ]
+    monkeypatch.setattr(service, "extract_pages", lambda _: pages)
+
+    context = service.extract_surrounding_context(
+        Path("document.pdf"), 2, "selected sentence", radius=8
+    )
+
+    assert "Previous page (p. 1)" in context
+    assert "Selected page before passage (p. 2): before " in context
+    assert "Selected page after passage (p. 2):  after" in context
+    assert "Following page (p. 3)" in context
